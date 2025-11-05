@@ -8,12 +8,10 @@ import sys
 import jax
 import jax.numpy as jnp
 
+# Make repo importable when running from examples/
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
-
-import jax
-import jax.numpy as jnp
 
 from jax_mobile_sim.environment import IndoorMapBatch, MapGenerationConfig, generate_map_batch
 from jax_mobile_sim.simulator import (
@@ -35,16 +33,14 @@ def _maybe_render(
     env_index: int,
     render_state: dict,
 ) -> dict:
-    """Render the requested environment on demand."""
-
-    render_ax = render_state["ax"]
-    render_config = render_state["config"]
-    renderer = render_state["renderer"]
-    plt_module = render_state["plt"]
+    """Render the requested environment on demand (lazy init)."""
+    render_ax = render_state.get("ax")
+    render_config = render_state.get("config")
+    renderer = render_state.get("renderer")
+    plt_module = render_state.get("plt")
 
     if renderer is None:
         from matplotlib import pyplot as plt
-
         from jax_mobile_sim.rendering import RenderConfig, render_environment
 
         plt.ion()
@@ -64,6 +60,7 @@ def _maybe_render(
     )
     render_ax.figure.canvas.flush_events()
     plt_module.pause(0.001)
+
     render_state["ax"] = render_ax
     return render_state
 
@@ -76,17 +73,19 @@ def initialize_state(
     sim_config: SimulationConfig,
     map_config: MapGenerationConfig,
 ) -> tuple[SimulationState, IndoorMapBatch]:
+    """Create maps + random initial positions for robots and people."""
     map_key, robot_key, people_key = jax.random.split(key, 3)
     maps = generate_map_batch(map_key, map_batch_size, map_config)
     margin = 2.0 * max(sim_config.robot_radius, sim_config.person_radius)
 
     def sample_positions(rng, count):
-        xs = jax.random.uniform(rng, (map_batch_size, count, 1), minval=margin, maxval=map_config.world_size[0] - margin)
+        xs = jax.random.uniform(
+            rng, (map_batch_size, count, 1),
+            minval=margin, maxval=map_config.world_size[0] - margin
+        )
         ys = jax.random.uniform(
-            jax.random.fold_in(rng, 1),
-            (map_batch_size, count, 1),
-            minval=margin,
-            maxval=map_config.world_size[1] - margin,
+            jax.random.fold_in(rng, 1), (map_batch_size, count, 1),
+            minval=margin, maxval=map_config.world_size[1] - margin
         )
         return jnp.concatenate([xs, ys], axis=-1)
 
@@ -101,79 +100,72 @@ def initialize_state(
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Run a random rollout in the 2D simulator.")
     parser.add_argument("--render", action="store_true", help="Enable matplotlib rendering for one environment.")
-    parser.add_argument(
-        "--env-index",
-        type=int,
-        default=0,
-        help="Environment index to render when --render is supplied.",
-    )
-    parser.add_argument(
-        "--steps",
-        type=int,
-        default=5,
-        help="Number of simulation steps to run.",
-    )
+    parser.add_argument("--env-index", type=int, default=0, help="Environment index to render.")
+    parser.add_argument("--steps", type=int, default=50, help="Number of simulation steps to run.")
+    parser.add_argument("--batch-size", type=int, default=8, help="Number of parallel environments.")
+    parser.add_argument("--num-people", type=int, default=5, help="People per environment.")
+    parser.add_argument("--num-robots", type=int, default=1, help="Robots per environment.")
+    parser.add_argument("--num-angles", type=int, default=360, help="LiDAR rays (uniform in [-pi, pi)).")
+    parser.add_argument("--lidar-max-range", type=float, default=10.0, help="LiDAR max range.")
     args = parser.parse_args(argv)
 
-def main():
-    batch_size = 8
-    num_robots = 1
-    num_people = 5
+    # Configs
     sim_config = SimulationConfig()
     map_config = MapGenerationConfig()
 
+    # Init state
     key = jax.random.PRNGKey(0)
-    state, maps = initialize_state(key, batch_size, num_robots, num_people, sim_config, map_config)
+    state, maps = initialize_state(
+        key,
+        args.batch_size,
+        args.num_robots,
+        args.num_people,
+        sim_config,
+        map_config,
+    )
 
+    # Controls + sensors
     actions_key = jax.random.PRNGKey(42)
-    angles = jnp.linspace(-jnp.pi, jnp.pi, 360, endpoint=False)
+    angles = jnp.linspace(-jnp.pi, jnp.pi, args.num_angles, endpoint=False)
 
-    render_state = {
-        "ax": None,
-        "config": None,
-        "renderer": None,
-        "plt": None,
-    }
+    # Rendering cache
+    render_state = {"ax": None, "config": None, "renderer": None, "plt": None}
+    env_to_render = int(jnp.clip(args.env_index, 0, args.batch_size - 1))
 
     for step in range(args.steps):
-    render_ax = None
-    render_config = None
-
-    for step in range(args.steps):
-    angles = jnp.linspace(-jnp.pi, jnp.pi, 180)
-
-    for step in range(5):
+        # Random actions in [-1, 1]
         actions_key, sub = jax.random.split(actions_key)
-        actions = jax.random.uniform(sub, (batch_size, num_robots, 2), minval=-1.0, maxval=1.0)
-        lidar_distances = lidar_scan(state.robots.position, angles, 10.0, maps)
-        state = step_simulation(state, actions, maps, sim_config, jax.random.fold_in(sub, step))
-        print(f"Step {step}: robot positions\n{state.robots.position}")
-        print(f"Lidar distances shape: {lidar_distances.shape}")
+        actions = jax.random.uniform(
+            sub,
+            (args.batch_size, args.num_robots, 2),
+            minval=-1.0, maxval=1.0,
+        )
 
+        # LiDAR (before stepping, for visualization of current state)
+        lidar_distances = lidar_scan(state.robots.position, angles, args.lidar_max_range, maps)
+
+        # Step simulation
+        state = step_simulation(state, actions, maps, sim_config, jax.random.fold_in(sub, step))
+
+        # Minimal log
+        if step % 10 == 0 or step == args.steps - 1:
+            print(f"[step {step}] positions shape: {state.robots.position.shape} | lidar: {lidar_distances.shape}")
+
+        # Optional render
         if args.render:
             render_state = _maybe_render(
-            if render_config is None:
-                from matplotlib import pyplot as plt
-
-                from jax_mobile_sim.rendering import RenderConfig, render_environment
-
-                plt.ion()
-                render_config = RenderConfig()
-            render_ax = render_environment(
                 state,
                 maps,
                 angles,
                 lidar_distances,
-                env_index=min(args.env_index, batch_size - 1),
+                env_index=env_to_render,
                 render_state=render_state,
             )
-                robot_index=0,
-                config=render_config,
-                ax=render_ax,
-            )
-            render_ax.figure.canvas.flush_events()
-            plt.pause(0.001)
+
+    # keep window open briefly if rendering
+    if args.render and render_state.get("plt") is not None:
+        render_state["plt"].pause(0.5)
+
 
 if __name__ == "__main__":
     main()
-

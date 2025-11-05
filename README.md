@@ -94,8 +94,22 @@ actions = jnp.zeros((1024, 1, 2))  # linear and angular commands
 key, step_key = jax.random.split(key)
 next_state = step_simulation(state, actions, maps, sim_config, step_key)
 angles = jnp.linspace(-jnp.pi, jnp.pi, 180)
-scan = lidar_scan(next_state.robots.position, angles, 30.0, maps)
+scan, _ = lidar_scan(
+    next_state.robots.position,
+    angles,
+    30.0,
+    maps,
+    people_positions=next_state.people.position,
+    person_radius=sim_config.person_radius,
+    num_subsamples=sim_config.lidar_updates_per_step,
+    origin_velocities=next_state.robots.velocity,
+    people_velocities=next_state.people.velocity,
+    dt=sim_config.dt,
+    return_history=True,
+)
 ```
+
+`SimulationConfig.dynamics_substeps` controls how many physics substeps are executed per call to `step_simulation`, while `SimulationConfig.lidar_updates_per_step` determines the number of high-frequency LiDAR casts performed between consecutive states.
 
 The API is functional and can be wrapped inside `jax.vmap` or `jax.jit` to achieve high throughput for reinforcement learning training loops.
 

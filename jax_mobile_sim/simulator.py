@@ -19,6 +19,8 @@ class SimulationConfig:
     max_robot_angular_speed: float = 1.5
     max_person_speed: float = 0.9
     person_noise_scale: float = 0.5
+    dynamics_substeps: int = 4
+    lidar_updates_per_step: int = 12
 
 
 @dataclass
@@ -127,9 +129,11 @@ def step_simulation(
     config: SimulationConfig,
     key: jax.Array,
 ) -> SimulationState:
-    """Advance the simulation by one step."""
+    """Advance the simulation by one step using substepped dynamics."""
 
-    dt = config.dt
+    num_substeps = max(int(config.dynamics_substeps), 1)
+    dt_total = config.dt
+    dt = dt_total / num_substeps
     robot_linear_cmd = jnp.clip(
         robot_actions[..., 0], -config.max_robot_speed, config.max_robot_speed
     )
@@ -137,25 +141,49 @@ def step_simulation(
         robot_actions[..., 1], -config.max_robot_angular_speed, config.max_robot_angular_speed
     )
 
-    headings = state.robots.heading
-    heading_dirs = jnp.stack([jnp.cos(headings), jnp.sin(headings)], axis=-1)
-    robot_vel = robot_linear_cmd[..., None] * heading_dirs
-    robot_positions = state.robots.position + dt * robot_vel
-    new_headings = _wrap_angle(headings + dt * robot_angular_cmd)
-
-    people_noise = config.person_noise_scale * jax.random.normal(key, state.people.velocity.shape)
-    people_velocity = _clip_speed(state.people.velocity + people_noise, config.max_person_speed)
-    people_positions = state.people.position + dt * people_velocity
-
     def resolve_positions(positions, radius):
-        return _resolve_axis_aligned_collisions(positions, radius, map_batch.segments, map_batch.segment_mask)
+        return _resolve_axis_aligned_collisions(
+            positions, radius, map_batch.segments, map_batch.segment_mask
+        )
 
-    robot_positions = resolve_positions(robot_positions, config.robot_radius)
-    people_positions = resolve_positions(people_positions, config.person_radius)
+    noise_scale = config.person_noise_scale * jnp.sqrt(
+        dt / jnp.maximum(dt_total, 1e-6)
+    )
 
-    heading_dirs_out = jnp.stack([jnp.cos(new_headings), jnp.sin(new_headings)], axis=-1)
+    def fori_body(_, carry):
+        robot_positions, headings, people_positions, people_velocity, key_inner = carry
+        key_inner, noise_key = jax.random.split(key_inner)
+
+        heading_dirs = jnp.stack([jnp.cos(headings), jnp.sin(headings)], axis=-1)
+        robot_positions = robot_positions + dt * (robot_linear_cmd[..., None] * heading_dirs)
+        headings = _wrap_angle(headings + dt * robot_angular_cmd)
+
+        people_noise = noise_scale * jax.random.normal(noise_key, people_velocity.shape)
+        people_velocity = _clip_speed(people_velocity + people_noise, config.max_person_speed)
+        people_positions = people_positions + dt * people_velocity
+
+        robot_positions = resolve_positions(robot_positions, config.robot_radius)
+        people_positions = resolve_positions(people_positions, config.person_radius)
+
+        return robot_positions, headings, people_positions, people_velocity, key_inner
+
+    robot_positions, headings, people_positions, people_velocity, final_key = jax.lax.fori_loop(
+        0,
+        num_substeps,
+        fori_body,
+        (
+            state.robots.position,
+            state.robots.heading,
+            state.people.position,
+            state.people.velocity,
+            key,
+        ),
+    )
+    del final_key
+
+    heading_dirs_out = jnp.stack([jnp.cos(headings), jnp.sin(headings)], axis=-1)
     robot_velocity_out = robot_linear_cmd[..., None] * heading_dirs_out
-    robots = RobotState(position=robot_positions, velocity=robot_velocity_out, heading=new_headings)
+    robots = RobotState(position=robot_positions, velocity=robot_velocity_out, heading=headings)
     people = PeopleState(position=people_positions, velocity=people_velocity)
     return SimulationState(robots=robots, people=people)
 
@@ -168,17 +196,34 @@ def lidar_scan(
     *,
     people_positions: jnp.ndarray | None = None,
     person_radius: float = 0.0,
-) -> jnp.ndarray:
-    """Perform batched lidar ray casting."""
+    num_subsamples: int = 1,
+    origin_velocities: jnp.ndarray | None = None,
+    people_velocities: jnp.ndarray | None = None,
+    dt: float | None = None,
+    return_history: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
+    """Perform batched lidar ray casting with optional high-frequency updates."""
 
     directions = jnp.stack([jnp.cos(angles), jnp.sin(angles)], axis=-1)  # (num_rays, 2)
-    max_range = jnp.minimum(jnp.asarray(max_range, dtype=origin.dtype), 30.0)
+    max_range_val = jnp.minimum(jnp.asarray(max_range, dtype=origin.dtype), 30.0)
 
     if people_positions is None:
         people_positions = jnp.zeros((origin.shape[0], 0, 2), dtype=origin.dtype)
+    if origin_velocities is None:
+        origin_velocities = jnp.zeros_like(origin)
+    if people_velocities is None:
+        people_velocities = jnp.zeros_like(people_positions)
+
+    origin_velocities = jnp.asarray(origin_velocities, dtype=origin.dtype)
+    people_velocities = jnp.asarray(people_velocities, dtype=origin.dtype)
 
     person_radius_sq = jnp.asarray(person_radius, dtype=origin.dtype) ** 2
+    segments = map_batch.segments
+    segment_mask = map_batch.segment_mask
 
+    ray_dx = directions[:, 0]
+    ray_dy = directions[:, 1]
+    ray_norm_sq = jnp.sum(directions * directions, axis=-1)
     def cast_environment(origin_env, segments_env, mask_env, people_env):
         mask_env = mask_env.astype(bool)
         x0, y0, x1, y1 = jnp.moveaxis(segments_env, -1, 0)
@@ -194,6 +239,15 @@ def lidar_scan(
         ray_dy = directions[:, 1]
         ray_norm_sq = jnp.sum(directions * directions, axis=-1)
 
+    def cast_environment(origin_env, segments_env, mask_env, people_env):
+        mask_env = mask_env.astype(bool)
+        x0, y0, x1, y1 = jnp.moveaxis(segments_env, -1, 0)
+        vertical = jnp.isclose(x0, x1)
+        horizontal = jnp.isclose(y0, y1)
+        x_min = jnp.minimum(x0, x1)
+        x_max = jnp.maximum(x0, x1)
+        y_min = jnp.minimum(y0, y1)
+        y_max = jnp.maximum(y0, y1)
         def cast_agent(origin_agent):
             ox, oy = origin_agent
 
@@ -229,6 +283,7 @@ def lidar_scan(
                 jnp.min(distances_v, axis=1), jnp.min(distances_h, axis=1)
             )
 
+            if people_env.shape[0] > 0:
             def compute_people_distances():
                 oc = origin_agent - people_env  # (num_people, 2)
                 c = jnp.sum(oc * oc, axis=-1) - person_radius_sq
@@ -242,6 +297,46 @@ def lidar_scan(
                 valid = (discriminant >= 0.0)[..., None] & (candidates >= 0.0)
                 distances = jnp.where(valid, candidates, jnp.inf)
                 min_people = jnp.min(jnp.min(distances, axis=-1), axis=-1)
+                min_distance = jnp.minimum(min_walls, min_people)
+            else:
+                min_distance = min_walls
+
+            return jnp.minimum(min_distance, max_range_val)
+
+        return jax.vmap(cast_agent)(origin_env)
+
+    def cast_snapshot(origin_snapshot, people_snapshot):
+        return jax.vmap(cast_environment)(
+            origin_snapshot, segments, segment_mask, people_snapshot
+        )
+
+    samples = max(int(num_subsamples), 1)
+    if samples == 1:
+        distances = cast_snapshot(origin, people_positions)
+        if return_history:
+            history = distances[jnp.newaxis, ...]
+            return distances, history
+        return distances
+
+    total_dt = 0.0 if dt is None else float(dt)
+    sub_dt = jnp.asarray(total_dt / samples, dtype=origin.dtype)
+    origin_delta = origin_velocities * sub_dt
+    people_delta = people_velocities * sub_dt
+
+    def scan_step(carry, _):
+        origin_pos, people_pos = carry
+        distances = cast_snapshot(origin_pos, people_pos)
+        next_origin = origin_pos + origin_delta
+        next_people = people_pos + people_delta
+        return (next_origin, next_people), distances
+
+    (_, _), history = jax.lax.scan(
+        scan_step, (origin, people_positions), None, length=samples
+    )
+    final = history[-1]
+    if return_history:
+        return final, history
+    return final
                 return jnp.minimum(min_walls, min_people)
 
             min_distance = jax.lax.cond(

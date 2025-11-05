@@ -12,6 +12,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+import jax
+import jax.numpy as jnp
+
 from jax_mobile_sim.environment import IndoorMapBatch, MapGenerationConfig, generate_map_batch
 from jax_mobile_sim.simulator import (
     PeopleState,
@@ -70,6 +73,7 @@ def main(argv: list[str] | None = None):
     )
     args = parser.parse_args(argv)
 
+def main():
     batch_size = 8
     num_robots = 1
     num_people = 5
@@ -86,6 +90,9 @@ def main(argv: list[str] | None = None):
     render_config = None
 
     for step in range(args.steps):
+    angles = jnp.linspace(-jnp.pi, jnp.pi, 180)
+
+    for step in range(5):
         actions_key, sub = jax.random.split(actions_key)
         actions = jax.random.uniform(sub, (batch_size, num_robots, 2), minval=-1.0, maxval=1.0)
         lidar_distances = lidar_scan(state.robots.position, angles, 10.0, maps)

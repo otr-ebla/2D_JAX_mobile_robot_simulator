@@ -59,6 +59,11 @@ This repository provides a lightweight, fully vectorised 2D indoor simulator bui
 
 The simulator itself has no third-party dependencies beyond JAX and the
 visualisation helpers.
+1. Install Python 3.10+ along with JAX and its accelerator-specific build (see the [official JAX installation guide](https://github.com/google/jax#installation)).
+2. Clone this repository.
+3. (Optional) Create a virtual environment and install extra dependencies required for experiments.
+
+The simulator itself has no third-party dependencies beyond JAX.
 
 ## Usage
 

@@ -26,6 +26,48 @@ from jax_mobile_sim.simulator import (
 )
 
 
+def _maybe_render(
+    state: SimulationState,
+    maps: IndoorMapBatch,
+    angles: jax.Array,
+    lidar_distances: jax.Array,
+    *,
+    env_index: int,
+    render_state: dict,
+) -> dict:
+    """Render the requested environment on demand."""
+
+    render_ax = render_state["ax"]
+    render_config = render_state["config"]
+    renderer = render_state["renderer"]
+    plt_module = render_state["plt"]
+
+    if renderer is None:
+        from matplotlib import pyplot as plt
+
+        from jax_mobile_sim.rendering import RenderConfig, render_environment
+
+        plt.ion()
+        render_state["config"] = render_config = RenderConfig()
+        render_state["renderer"] = renderer = render_environment
+        render_state["plt"] = plt_module = plt
+
+    render_ax = renderer(
+        state,
+        maps,
+        angles,
+        lidar_distances,
+        env_index=env_index,
+        robot_index=0,
+        config=render_config,
+        ax=render_ax,
+    )
+    render_ax.figure.canvas.flush_events()
+    plt_module.pause(0.001)
+    render_state["ax"] = render_ax
+    return render_state
+
+
 def initialize_state(
     key: jax.Array,
     map_batch_size: int,
@@ -86,6 +128,14 @@ def main():
     actions_key = jax.random.PRNGKey(42)
     angles = jnp.linspace(-jnp.pi, jnp.pi, 360, endpoint=False)
 
+    render_state = {
+        "ax": None,
+        "config": None,
+        "renderer": None,
+        "plt": None,
+    }
+
+    for step in range(args.steps):
     render_ax = None
     render_config = None
 
@@ -101,6 +151,7 @@ def main():
         print(f"Lidar distances shape: {lidar_distances.shape}")
 
         if args.render:
+            render_state = _maybe_render(
             if render_config is None:
                 from matplotlib import pyplot as plt
 
@@ -114,6 +165,8 @@ def main():
                 angles,
                 lidar_distances,
                 env_index=min(args.env_index, batch_size - 1),
+                render_state=render_state,
+            )
                 robot_index=0,
                 config=render_config,
                 ax=render_ax,

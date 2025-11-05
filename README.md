@@ -82,11 +82,15 @@ sim_config = SimulationConfig()
 
 maps = generate_map_batch(key, batch_size=1024, config=map_config)
 state = SimulationState(
-    robots=RobotState(position=jnp.zeros((1024, 1, 2)), velocity=jnp.zeros((1024, 1, 2))),
+    robots=RobotState(
+        position=jnp.zeros((1024, 1, 2)),
+        velocity=jnp.zeros((1024, 1, 2)),
+        heading=jnp.zeros((1024, 1)),
+    ),
     people=PeopleState(position=jnp.zeros((1024, 5, 2)), velocity=jnp.zeros((1024, 5, 2))),
 )
 
-actions = jnp.zeros((1024, 1, 2))
+actions = jnp.zeros((1024, 1, 2))  # linear and angular commands
 key, step_key = jax.random.split(key)
 next_state = step_simulation(state, actions, maps, sim_config, step_key)
 angles = jnp.linspace(-jnp.pi, jnp.pi, 180)

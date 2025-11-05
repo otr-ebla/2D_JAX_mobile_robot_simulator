@@ -13,11 +13,52 @@ This repository provides a lightweight, fully vectorised 2D indoor simulator bui
 
 ## Installation
 
-1. Install Python 3.10+ along with JAX and its accelerator-specific build (see the [official JAX installation guide](https://github.com/google/jax#installation)).
-2. Clone this repository.
-3. (Optional) Create a virtual environment and install extra dependencies required for experiments.
+1. Install Python 3.10+ and create a virtual environment.
+2. Install the JAX build that matches your accelerator before pulling in the rest of the dependencies:
 
-The simulator itself has no third-party dependencies beyond JAX.
+   - **CUDA 12.x**
+
+     ```bash
+     pip install --upgrade "jax[cuda12_pip]==0.4.31" \
+         -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+     ```
+
+   - **CUDA 11.x**
+
+     ```bash
+     pip install --upgrade "jax[cuda11_pip]==0.4.31" \
+         -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+     ```
+
+   - **CPU only**
+
+     ```bash
+     pip install --upgrade "jax[cpu]==0.4.31"
+     ```
+
+   Installing one of the GPU wheels above ensures that `jaxlib` contains the CUDA
+   runtime; otherwise JAX will fall back to CPU execution with a warning similar
+   to the one shown in the issue description.
+
+3. Clone this repository.
+4. Install the remaining Python dependencies:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   Pre-made files are also provided for GPU users who prefer a single command:
+
+   ```bash
+   # CUDA 12.x
+   pip install -r requirements-cuda12.txt
+
+   # CUDA 11.x
+   pip install -r requirements-cuda11.txt
+   ```
+
+The simulator itself has no third-party dependencies beyond JAX and the
+visualisation helpers.
 
 ## Usage
 

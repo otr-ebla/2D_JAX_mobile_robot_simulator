@@ -13,8 +13,8 @@ class SimulationConfig:
     """Configuration parameters for the simulator."""
 
     dt: float = 0.1
-    robot_radius: float = 0.4
-    person_radius: float = 0.35
+    robot_radius: float = 0.2
+    person_radius: float = 0.2
     max_robot_speed: float = 1.0
     max_robot_angular_speed: float = 1.5
     max_person_speed: float = 0.9
@@ -172,6 +172,7 @@ def lidar_scan(
     """Perform batched lidar ray casting."""
 
     directions = jnp.stack([jnp.cos(angles), jnp.sin(angles)], axis=-1)  # (num_rays, 2)
+    max_range = jnp.minimum(jnp.asarray(max_range, dtype=origin.dtype), 30.0)
 
     if people_positions is None:
         people_positions = jnp.zeros((origin.shape[0], 0, 2), dtype=origin.dtype)

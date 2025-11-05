@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
@@ -149,6 +150,12 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--num-people", type=int, default=5, help="People per environment.")
     parser.add_argument("--num-robots", type=int, default=1, help="Robots per environment.")
     parser.add_argument("--num-angles", type=int, default=360, help="LiDAR rays (uniform in [-pi, pi)).")
+    parser.add_argument(
+        "--lidar-max-range",
+        type=float,
+        default=30.0,
+        help="LiDAR max range (values above 30 m are clipped).",
+    )
     parser.add_argument("--lidar-max-range", type=float, default=10.0, help="LiDAR max range.")
     parser.add_argument(
         "--sim-speed",
@@ -162,7 +169,9 @@ def main(argv: list[str] | None = None):
         parser.error("--sim-speed must be positive.")
 
     # Configs
-    sim_config = SimulationConfig()
+    base_sim_config = SimulationConfig()
+    sim_config = replace(base_sim_config, dt=base_sim_config.dt * args.sim_speed)
+    real_time_dt = base_sim_config.dt
     map_config = MapGenerationConfig()
 
     # Init state
@@ -206,6 +215,8 @@ def main(argv: list[str] | None = None):
     # Rendering cache
     render_state = {"ax": None, "config": None, "renderer": None, "plt": None}
     env_to_render = int(jnp.clip(args.env_index, 0, args.batch_size - 1))
+
+    lidar_max_range = min(args.lidar_max_range, 30.0)
 
     for step in range(args.steps):
         actions_key, sub = jax.random.split(actions_key)
@@ -289,6 +300,7 @@ def main(argv: list[str] | None = None):
         lidar_distances = lidar_scan(
             state.robots.position,
             angles,
+            lidar_max_range,
             args.lidar_max_range,
             maps,
             people_positions=state.people.position,
@@ -304,6 +316,7 @@ def main(argv: list[str] | None = None):
 
         # Optional render
         if args.render:
+            frame_delay = real_time_dt / max(args.sim_speed, 1e-6)
             frame_delay = sim_config.dt / max(args.sim_speed, 1e-6)
             render_state = _maybe_render(
                 state,

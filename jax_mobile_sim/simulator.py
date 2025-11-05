@@ -180,62 +180,82 @@ def lidar_scan(
     person_radius_sq = jnp.asarray(person_radius, dtype=origin.dtype) ** 2
 
     def cast_environment(origin_env, segments_env, mask_env, people_env):
-        vertical = jnp.isclose(segments_env[:, 0], segments_env[:, 2])
-        horizontal = jnp.isclose(segments_env[:, 1], segments_env[:, 3])
+        mask_env = mask_env.astype(bool)
+        x0, y0, x1, y1 = jnp.moveaxis(segments_env, -1, 0)
+        vertical = jnp.isclose(x0, x1)
+        horizontal = jnp.isclose(y0, y1)
+        x_min = jnp.minimum(x0, x1)
+        x_max = jnp.maximum(x0, x1)
+        y_min = jnp.minimum(y0, y1)
+        y_max = jnp.maximum(y0, y1)
+
         num_people = people_env.shape[0]
+        ray_dx = directions[:, 0]
+        ray_dy = directions[:, 1]
+        ray_norm_sq = jnp.sum(directions * directions, axis=-1)
 
         def cast_agent(origin_agent):
-            def cast_ray(direction):
-                ox, oy = origin_agent
-                dx, dy = direction
+            ox, oy = origin_agent
 
-                denom_v = jnp.where(jnp.abs(dx) < 1e-6, jnp.nan, dx)
-                t_vertical = (segments_env[:, 0] - ox) / denom_v
-                y_hit = oy + t_vertical * dy
-                valid_v = (
-                    mask_env
-                    & vertical
-                    & (t_vertical > 0.0)
-                    & (y_hit >= jnp.minimum(segments_env[:, 1], segments_env[:, 3]))
-                    & (y_hit <= jnp.maximum(segments_env[:, 1], segments_env[:, 3]))
-                )
+            valid_dx = jnp.abs(ray_dx) > 1e-6
+            safe_dx = jnp.where(valid_dx, ray_dx, 1.0)
+            t_vertical = (x0[None, :] - ox) / safe_dx[:, None]
+            y_hit = oy + t_vertical * ray_dy[:, None]
+            vertical_hits = (
+                mask_env[None, :]
+                & vertical[None, :]
+                & valid_dx[:, None]
+                & (t_vertical > 0.0)
+                & (y_hit >= y_min[None, :])
+                & (y_hit <= y_max[None, :])
+            )
+            distances_v = jnp.where(vertical_hits, t_vertical, jnp.inf)
 
-                denom_h = jnp.where(jnp.abs(dy) < 1e-6, jnp.nan, dy)
-                t_horizontal = (segments_env[:, 1] - oy) / denom_h
-                x_hit = ox + t_horizontal * dx
-                valid_h = (
-                    mask_env
-                    & horizontal
-                    & (t_horizontal > 0.0)
-                    & (x_hit >= jnp.minimum(segments_env[:, 0], segments_env[:, 2]))
-                    & (x_hit <= jnp.maximum(segments_env[:, 0], segments_env[:, 2]))
-                )
+            valid_dy = jnp.abs(ray_dy) > 1e-6
+            safe_dy = jnp.where(valid_dy, ray_dy, 1.0)
+            t_horizontal = (y0[None, :] - oy) / safe_dy[:, None]
+            x_hit = ox + t_horizontal * ray_dx[:, None]
+            horizontal_hits = (
+                mask_env[None, :]
+                & horizontal[None, :]
+                & valid_dy[:, None]
+                & (t_horizontal > 0.0)
+                & (x_hit >= x_min[None, :])
+                & (x_hit <= x_max[None, :])
+            )
+            distances_h = jnp.where(horizontal_hits, t_horizontal, jnp.inf)
 
-                distances_v = jnp.where(valid_v, t_vertical, jnp.inf)
-                distances_h = jnp.where(valid_h, t_horizontal, jnp.inf)
-                min_distance = jnp.minimum(jnp.min(distances_v), jnp.min(distances_h))
+            min_walls = jnp.minimum(
+                jnp.min(distances_v, axis=1), jnp.min(distances_h, axis=1)
+            )
 
-                if num_people > 0:
-                    oc = origin_agent - people_env  # (num_people, 2)
-                    a = jnp.dot(direction, direction)
-                    a = jnp.maximum(a, 1e-12)
-                    b = 2.0 * jnp.sum(direction * oc, axis=-1)
-                    c = jnp.sum(oc * oc, axis=-1) - person_radius_sq
-                    discriminant = b * b - 4.0 * a * c
-                    sqrt_disc = jnp.sqrt(jnp.maximum(discriminant, 0.0))
-                    inv_two_a = 0.5 / a
-                    t0 = (-b - sqrt_disc) * inv_two_a
-                    t1 = (-b + sqrt_disc) * inv_two_a
-                    candidates = jnp.stack([t0, t1], axis=-1)
-                    valid = (discriminant >= 0.0)[:, None] & (candidates >= 0.0)
-                    distances = jnp.where(valid, candidates, jnp.inf)
-                    min_people_distance = jnp.min(jnp.min(distances, axis=-1))
-                    min_distance = jnp.minimum(min_distance, min_people_distance)
-                return jnp.minimum(min_distance, max_range)
+            def compute_people_distances():
+                oc = origin_agent - people_env  # (num_people, 2)
+                c = jnp.sum(oc * oc, axis=-1) - person_radius_sq
+                b = 2.0 * jnp.einsum("rd,pd->rp", directions, oc)
+                discriminant = b * b - 4.0 * ray_norm_sq[:, None] * c[None, :]
+                sqrt_disc = jnp.sqrt(jnp.maximum(discriminant, 0.0))
+                inv_two_a = 0.5 / jnp.maximum(ray_norm_sq, 1e-12)
+                t0 = (-b - sqrt_disc) * inv_two_a[:, None]
+                t1 = (-b + sqrt_disc) * inv_two_a[:, None]
+                candidates = jnp.stack([t0, t1], axis=-1)
+                valid = (discriminant >= 0.0)[..., None] & (candidates >= 0.0)
+                distances = jnp.where(valid, candidates, jnp.inf)
+                min_people = jnp.min(jnp.min(distances, axis=-1), axis=-1)
+                return jnp.minimum(min_walls, min_people)
 
-            return jax.vmap(cast_ray)(directions)
+            min_distance = jax.lax.cond(
+                num_people > 0,
+                lambda _: compute_people_distances(),
+                lambda _: min_walls,
+                operand=None,
+            )
+
+            return jnp.minimum(min_distance, max_range)
 
         return jax.vmap(cast_agent)(origin_env)
 
-    return jax.vmap(cast_environment)(origin, map_batch.segments, map_batch.segment_mask, people_positions)
+    return jax.vmap(cast_environment)(
+        origin, map_batch.segments, map_batch.segment_mask, people_positions
+    )
 

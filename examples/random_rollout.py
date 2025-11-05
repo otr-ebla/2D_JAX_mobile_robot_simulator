@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None):
         default=30.0,
         help="LiDAR max range (values above 30 m are clipped).",
     )
+    parser.add_argument("--lidar-max-range", type=float, default=10.0, help="LiDAR max range.")
     parser.add_argument(
         "--sim-speed",
         type=float,
@@ -256,6 +257,8 @@ def main(argv: list[str] | None = None):
             linear_speed = robot_speed * np.clip(np.cos(heading_error), 0.0, 1.0)
             linear_speed = np.where(distances <= 0.1, 0.0, linear_speed)
             actions_np = np.stack([linear_speed, angular_speed], axis=-1).astype(np.float32)
+            robot_speed = 0.9 * sim_config.max_robot_speed
+            actions_np = (directions * robot_speed).astype(np.float32)
             actions = jnp.asarray(actions_np)
         else:
             current_targets = np.zeros((args.batch_size, args.num_robots, 2), dtype=np.float32)
@@ -298,6 +301,7 @@ def main(argv: list[str] | None = None):
             state.robots.position,
             angles,
             lidar_max_range,
+            args.lidar_max_range,
             maps,
             people_positions=state.people.position,
             person_radius=sim_config.person_radius,
@@ -313,6 +317,7 @@ def main(argv: list[str] | None = None):
         # Optional render
         if args.render:
             frame_delay = real_time_dt / max(args.sim_speed, 1e-6)
+            frame_delay = sim_config.dt / max(args.sim_speed, 1e-6)
             render_state = _maybe_render(
                 state,
                 maps,

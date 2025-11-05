@@ -100,11 +100,14 @@ def render_environment(
         ax.add_line(line)
 
     robot_pos = robot_positions[robot_index]
+    robot_velocity = _to_numpy(state.robots.velocity[env_index, robot_index])
     robot_circle = Circle(robot_pos, radius=config.robot_radius, color=config.robot_color, alpha=0.9)
     ax.add_patch(robot_circle)
     robot_heading = float(_to_numpy(state.robots.heading[env_index, robot_index]))
     heading_vec = np.array([np.cos(robot_heading), np.sin(robot_heading)], dtype=float)
     robot_end = robot_pos + heading_vec * config.heading_indicator_length
+    heading = _unit_heading(robot_velocity)
+    robot_end = robot_pos + heading * config.heading_indicator_length
     robot_line = Line2D(
         [robot_pos[0], robot_end[0]],
         [robot_pos[1], robot_end[1]],

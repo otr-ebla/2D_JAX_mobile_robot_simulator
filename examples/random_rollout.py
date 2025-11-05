@@ -1,6 +1,7 @@
 """Example rollout showcasing the 2D JAX simulator."""
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
@@ -55,6 +56,23 @@ def initialize_state(
     return SimulationState(robots=robot_state, people=people_state), maps
 
 
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="Run a random rollout in the 2D simulator.")
+    parser.add_argument("--render", action="store_true", help="Enable matplotlib rendering for one environment.")
+    parser.add_argument(
+        "--env-index",
+        type=int,
+        default=0,
+        help="Environment index to render when --render is supplied.",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=5,
+        help="Number of simulation steps to run.",
+    )
+    args = parser.parse_args(argv)
+
 def main():
     batch_size = 8
     num_robots = 1
@@ -66,6 +84,12 @@ def main():
     state, maps = initialize_state(key, batch_size, num_robots, num_people, sim_config, map_config)
 
     actions_key = jax.random.PRNGKey(42)
+    angles = jnp.linspace(-jnp.pi, jnp.pi, 360, endpoint=False)
+
+    render_ax = None
+    render_config = None
+
+    for step in range(args.steps):
     angles = jnp.linspace(-jnp.pi, jnp.pi, 180)
 
     for step in range(5):
@@ -76,6 +100,26 @@ def main():
         print(f"Step {step}: robot positions\n{state.robots.position}")
         print(f"Lidar distances shape: {lidar_distances.shape}")
 
+        if args.render:
+            if render_config is None:
+                from matplotlib import pyplot as plt
+
+                from jax_mobile_sim.rendering import RenderConfig, render_environment
+
+                plt.ion()
+                render_config = RenderConfig()
+            render_ax = render_environment(
+                state,
+                maps,
+                angles,
+                lidar_distances,
+                env_index=min(args.env_index, batch_size - 1),
+                robot_index=0,
+                config=render_config,
+                ax=render_ax,
+            )
+            render_ax.figure.canvas.flush_events()
+            plt.pause(0.001)
 
 if __name__ == "__main__":
     main()

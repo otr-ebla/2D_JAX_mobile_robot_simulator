@@ -1,0 +1,5 @@
+# GPU-enabled installation targetting CUDA 11.x drivers.
+--find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+jax[cuda11_pip]==0.4.31
+numpy>=1.24
+matplotlib>=3.7

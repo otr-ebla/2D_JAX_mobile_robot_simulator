@@ -11,6 +11,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+import jax
+import jax.numpy as jnp
+
 from jax_mobile_sim.environment import IndoorMapBatch, MapGenerationConfig, generate_map_batch
 from jax_mobile_sim.simulator import (
     PeopleState,

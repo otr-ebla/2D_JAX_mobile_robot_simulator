@@ -12,6 +12,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+import jax
+import jax.numpy as jnp
+
 from jax_mobile_sim.environment import IndoorMapBatch, MapGenerationConfig, generate_map_batch
 from jax_mobile_sim.simulator import (
     PeopleState,
@@ -112,6 +115,7 @@ def main(argv: list[str] | None = None):
     )
     args = parser.parse_args(argv)
 
+def main():
     batch_size = 8
     num_robots = 1
     num_people = 5
@@ -132,6 +136,13 @@ def main(argv: list[str] | None = None):
     }
 
     for step in range(args.steps):
+    render_ax = None
+    render_config = None
+
+    for step in range(args.steps):
+    angles = jnp.linspace(-jnp.pi, jnp.pi, 180)
+
+    for step in range(5):
         actions_key, sub = jax.random.split(actions_key)
         actions = jax.random.uniform(sub, (batch_size, num_robots, 2), minval=-1.0, maxval=1.0)
         lidar_distances = lidar_scan(state.robots.position, angles, 10.0, maps)
@@ -141,6 +152,14 @@ def main(argv: list[str] | None = None):
 
         if args.render:
             render_state = _maybe_render(
+            if render_config is None:
+                from matplotlib import pyplot as plt
+
+                from jax_mobile_sim.rendering import RenderConfig, render_environment
+
+                plt.ion()
+                render_config = RenderConfig()
+            render_ax = render_environment(
                 state,
                 maps,
                 angles,
@@ -148,6 +167,12 @@ def main(argv: list[str] | None = None):
                 env_index=min(args.env_index, batch_size - 1),
                 render_state=render_state,
             )
+                robot_index=0,
+                config=render_config,
+                ax=render_ax,
+            )
+            render_ax.figure.canvas.flush_events()
+            plt.pause(0.001)
 
 if __name__ == "__main__":
     main()

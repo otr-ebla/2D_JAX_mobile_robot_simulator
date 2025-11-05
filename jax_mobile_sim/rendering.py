@@ -8,6 +8,7 @@ from typing import Optional
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.collections import LineCollection
+from matplotlib.lines import Line2D
 from matplotlib.patches import Circle
 
 from .environment import IndoorMapBatch
@@ -20,17 +21,32 @@ class RenderConfig:
 
     robot_radius: float = 0.2
     person_radius: float = 0.2
-    lidar_color: str = "tab:orange"
+    lidar_far_color: tuple[float, float, float] = (0.83, 0.83, 0.83)
+    lidar_near_color: tuple[float, float, float] = (1.0, 0.0, 0.0)
     wall_color: str = "black"
     robot_color: str = "tab:blue"
     person_color: str = "tab:green"
     lidar_alpha: float = 0.4
+    waypoint_marker_color: str = "red"
+    waypoint_marker_size: float = 120.0
+    heading_indicator_length: float = 0.15
+    robot_heading_color: str = "white"
+    person_heading_color: str = "white"
+    heading_indicator_linewidth: float = 1.5
 
 
 def _to_numpy(array) -> np.ndarray:
     """Convert a JAX array or nested structure to a NumPy array."""
 
     return np.asarray(array)
+
+
+def _unit_heading(vector: np.ndarray) -> np.ndarray:
+    heading = np.asarray(vector, dtype=float)
+    norm = np.linalg.norm(heading)
+    if norm < 1e-6:
+        return np.array([1.0, 0.0], dtype=float)
+    return heading / norm
 
 
 def render_environment(
@@ -41,6 +57,7 @@ def render_environment(
     *,
     env_index: int = 0,
     robot_index: int = 0,
+    robot_waypoints=None,
     config: Optional[RenderConfig] = None,
     ax: Optional[plt.Axes] = None,
 ) -> plt.Axes:
@@ -67,26 +84,71 @@ def render_environment(
 
     robot_positions = _to_numpy(state.robots.position[env_index])
     people_positions = _to_numpy(state.people.position[env_index])
+    people_velocities = _to_numpy(state.people.velocity[env_index])
 
-    for person_pos in people_positions:
+    for person_pos, person_vel in zip(people_positions, people_velocities):
         circle = Circle(person_pos, radius=config.person_radius, color=config.person_color, alpha=0.8)
         ax.add_patch(circle)
+        heading = _unit_heading(person_vel)
+        end = person_pos + heading * config.heading_indicator_length
+        line = Line2D(
+            [person_pos[0], end[0]],
+            [person_pos[1], end[1]],
+            color=config.person_heading_color,
+            linewidth=config.heading_indicator_linewidth,
+        )
+        ax.add_line(line)
 
     robot_pos = robot_positions[robot_index]
+    robot_velocity = _to_numpy(state.robots.velocity[env_index, robot_index])
     robot_circle = Circle(robot_pos, radius=config.robot_radius, color=config.robot_color, alpha=0.9)
     ax.add_patch(robot_circle)
+    heading = _unit_heading(robot_velocity)
+    robot_end = robot_pos + heading * config.heading_indicator_length
+    robot_line = Line2D(
+        [robot_pos[0], robot_end[0]],
+        [robot_pos[1], robot_end[1]],
+        color=config.robot_heading_color,
+        linewidth=config.heading_indicator_linewidth,
+    )
+    ax.add_line(robot_line)
 
     directions = np.stack([np.cos(_to_numpy(lidar_angles)), np.sin(_to_numpy(lidar_angles))], axis=-1)
     distances = _to_numpy(lidar_distances[env_index, robot_index])
-    endpoints = robot_pos + distances[:, None] * directions
-    lidar_segments = np.stack([np.broadcast_to(robot_pos, endpoints.shape), endpoints], axis=1)
+    start_offsets = config.robot_radius * directions
+    start_points = robot_pos + start_offsets
+    visible_lengths = np.maximum(distances - config.robot_radius, 0.0)
+    endpoints = start_points + visible_lengths[:, None] * directions
+    lidar_segments = np.stack([start_points, endpoints], axis=1)
+    if len(distances) > 0:
+        max_distance = np.max(distances)
+        if max_distance <= 1e-6:
+            mix = np.zeros_like(distances)
+        else:
+            mix = 1.0 - np.clip(distances / max_distance, 0.0, 1.0)
+        near_color = np.asarray((*config.lidar_near_color, config.lidar_alpha))
+        far_color = np.asarray((*config.lidar_far_color, config.lidar_alpha))
+        colors = far_color + mix[:, None] * (near_color - far_color)
+    else:
+        colors = np.zeros((0, 4))
     lidar_collection = LineCollection(
         lidar_segments,
-        colors=config.lidar_color,
+        colors=colors,
         linewidths=1.0,
-        alpha=config.lidar_alpha,
     )
     ax.add_collection(lidar_collection)
+
+    if robot_waypoints is not None:
+        waypoint = _to_numpy(robot_waypoints[env_index, robot_index])
+        if np.all(np.isfinite(waypoint)):
+            ax.scatter(
+                waypoint[0],
+                waypoint[1],
+                marker="*",
+                s=config.waypoint_marker_size,
+                c=config.waypoint_marker_color,
+                edgecolors="none",
+            )
 
     ax.set_xlim(0.0, world_size[0])
     ax.set_ylim(0.0, world_size[1])

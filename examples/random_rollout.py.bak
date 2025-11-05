@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None):
         default=30.0,
         help="LiDAR max range (values above 30 m are clipped).",
     )
+    parser.add_argument("--lidar-max-range", type=float, default=10.0, help="LiDAR max range.")
     parser.add_argument(
         "--sim-speed",
         type=float,
@@ -296,13 +297,12 @@ def main(argv: list[str] | None = None):
             people_targets = np.zeros((args.batch_size, args.num_people, 2), dtype=np.float32)
 
         # LiDAR (before stepping, for visualization of current state)
-        # LiDAR (before stepping, for visualization of current state)
-        # LiDAR (before stepping, for visualization of current state)
         lidar_distances = lidar_scan(
             state.robots.position,
             angles,
-            lidar_max_range,  # This is the max_range parameter
-            maps,              # This is the map_batch parameter
+            lidar_max_range,
+            args.lidar_max_range,
+            maps,
             people_positions=state.people.position,
             person_radius=sim_config.person_radius,
         )

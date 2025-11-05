@@ -224,6 +224,20 @@ def lidar_scan(
     ray_dx = directions[:, 0]
     ray_dy = directions[:, 1]
     ray_norm_sq = jnp.sum(directions * directions, axis=-1)
+    def cast_environment(origin_env, segments_env, mask_env, people_env):
+        mask_env = mask_env.astype(bool)
+        x0, y0, x1, y1 = jnp.moveaxis(segments_env, -1, 0)
+        vertical = jnp.isclose(x0, x1)
+        horizontal = jnp.isclose(y0, y1)
+        x_min = jnp.minimum(x0, x1)
+        x_max = jnp.maximum(x0, x1)
+        y_min = jnp.minimum(y0, y1)
+        y_max = jnp.maximum(y0, y1)
+
+        num_people = people_env.shape[0]
+        ray_dx = directions[:, 0]
+        ray_dy = directions[:, 1]
+        ray_norm_sq = jnp.sum(directions * directions, axis=-1)
 
     def cast_environment(origin_env, segments_env, mask_env, people_env):
         mask_env = mask_env.astype(bool)
@@ -270,6 +284,7 @@ def lidar_scan(
             )
 
             if people_env.shape[0] > 0:
+            def compute_people_distances():
                 oc = origin_agent - people_env  # (num_people, 2)
                 c = jnp.sum(oc * oc, axis=-1) - person_radius_sq
                 b = 2.0 * jnp.einsum("rd,pd->rp", directions, oc)
@@ -322,4 +337,20 @@ def lidar_scan(
     if return_history:
         return final, history
     return final
+                return jnp.minimum(min_walls, min_people)
+
+            min_distance = jax.lax.cond(
+                num_people > 0,
+                lambda _: compute_people_distances(),
+                lambda _: min_walls,
+                operand=None,
+            )
+
+            return jnp.minimum(min_distance, max_range)
+
+        return jax.vmap(cast_agent)(origin_env)
+
+    return jax.vmap(cast_environment)(
+        origin, map_batch.segments, map_batch.segment_mask, people_positions
+    )
 

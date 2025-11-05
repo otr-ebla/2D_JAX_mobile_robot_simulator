@@ -246,6 +246,8 @@ def main(argv: list[str] | None = None):
             linear_speed = robot_speed * np.clip(np.cos(heading_error), 0.0, 1.0)
             linear_speed = np.where(distances <= 0.1, 0.0, linear_speed)
             actions_np = np.stack([linear_speed, angular_speed], axis=-1).astype(np.float32)
+            robot_speed = 0.9 * sim_config.max_robot_speed
+            actions_np = (directions * robot_speed).astype(np.float32)
             actions = jnp.asarray(actions_np)
         else:
             current_targets = np.zeros((args.batch_size, args.num_robots, 2), dtype=np.float32)

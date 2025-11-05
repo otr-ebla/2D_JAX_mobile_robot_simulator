@@ -1,0 +1,5 @@
+# Core simulator dependencies excluding JAX itself.
+# Install the accelerator-specific JAX build that matches your hardware as
+# documented in README.md before installing this file.
+numpy>=1.24
+matplotlib>=3.7

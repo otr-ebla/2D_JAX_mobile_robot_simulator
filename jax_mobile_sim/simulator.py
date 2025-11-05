@@ -146,14 +146,23 @@ def lidar_scan(
     angles: jnp.ndarray,
     max_range: float,
     map_batch: IndoorMapBatch,
+    *,
+    people_positions: jnp.ndarray | None = None,
+    person_radius: float = 0.0,
 ) -> jnp.ndarray:
     """Perform batched lidar ray casting."""
 
     directions = jnp.stack([jnp.cos(angles), jnp.sin(angles)], axis=-1)  # (num_rays, 2)
 
-    def cast_environment(origin_env, segments_env, mask_env):
+    if people_positions is None:
+        people_positions = jnp.zeros((origin.shape[0], 0, 2), dtype=origin.dtype)
+
+    person_radius_sq = jnp.asarray(person_radius, dtype=origin.dtype) ** 2
+
+    def cast_environment(origin_env, segments_env, mask_env, people_env):
         vertical = jnp.isclose(segments_env[:, 0], segments_env[:, 2])
         horizontal = jnp.isclose(segments_env[:, 1], segments_env[:, 3])
+        num_people = people_env.shape[0]
 
         def cast_agent(origin_agent):
             def cast_ray(direction):
@@ -185,11 +194,28 @@ def lidar_scan(
                 distances_v = jnp.where(valid_v, t_vertical, jnp.inf)
                 distances_h = jnp.where(valid_h, t_horizontal, jnp.inf)
                 min_distance = jnp.minimum(jnp.min(distances_v), jnp.min(distances_h))
+
+                if num_people > 0:
+                    oc = origin_agent - people_env  # (num_people, 2)
+                    a = jnp.dot(direction, direction)
+                    a = jnp.maximum(a, 1e-12)
+                    b = 2.0 * jnp.sum(direction * oc, axis=-1)
+                    c = jnp.sum(oc * oc, axis=-1) - person_radius_sq
+                    discriminant = b * b - 4.0 * a * c
+                    sqrt_disc = jnp.sqrt(jnp.maximum(discriminant, 0.0))
+                    inv_two_a = 0.5 / a
+                    t0 = (-b - sqrt_disc) * inv_two_a
+                    t1 = (-b + sqrt_disc) * inv_two_a
+                    candidates = jnp.stack([t0, t1], axis=-1)
+                    valid = (discriminant >= 0.0)[:, None] & (candidates >= 0.0)
+                    distances = jnp.where(valid, candidates, jnp.inf)
+                    min_people_distance = jnp.min(jnp.min(distances, axis=-1))
+                    min_distance = jnp.minimum(min_distance, min_people_distance)
                 return jnp.minimum(min_distance, max_range)
 
             return jax.vmap(cast_ray)(directions)
 
         return jax.vmap(cast_agent)(origin_env)
 
-    return jax.vmap(cast_environment)(origin, map_batch.segments, map_batch.segment_mask)
+    return jax.vmap(cast_environment)(origin, map_batch.segments, map_batch.segment_mask, people_positions)
 

@@ -254,7 +254,14 @@ def main(argv: list[str] | None = None):
             people_targets = np.zeros((args.batch_size, args.num_people, 2), dtype=np.float32)
 
         # LiDAR (before stepping, for visualization of current state)
-        lidar_distances = lidar_scan(state.robots.position, angles, args.lidar_max_range, maps)
+        lidar_distances = lidar_scan(
+            state.robots.position,
+            angles,
+            args.lidar_max_range,
+            maps,
+            people_positions=state.people.position,
+            person_radius=sim_config.person_radius,
+        )
 
         # Step simulation
         state = step_simulation(state, actions, maps, sim_config, jax.random.fold_in(sub, step))

@@ -34,6 +34,8 @@ def _maybe_render(
     *,
     env_index: int,
     render_state: dict,
+    sim_config: SimulationConfig,
+    frame_delay: float,
 ) -> dict:
     """Render the requested environment on demand (lazy init)."""
     render_ax = render_state.get("ax")
@@ -46,7 +48,10 @@ def _maybe_render(
         from jax_mobile_sim.rendering import RenderConfig, render_environment
 
         plt.ion()
-        render_state["config"] = render_config = RenderConfig()
+        render_state["config"] = render_config = RenderConfig(
+            robot_radius=sim_config.robot_radius,
+            person_radius=sim_config.person_radius,
+        )
         render_state["renderer"] = renderer = render_environment
         render_state["plt"] = plt_module = plt
 
@@ -65,7 +70,7 @@ def _maybe_render(
         ax=render_ax,
     )
     render_ax.figure.canvas.flush_events()
-    plt_module.pause(0.001)
+    plt_module.pause(max(frame_delay, 0.0))
 
     render_state["ax"] = render_ax
     return render_state
@@ -98,7 +103,11 @@ def initialize_state(
     robot_pos = sample_positions(robot_key, num_robots)
     people_pos = sample_positions(people_key, num_people)
 
-    robot_state = RobotState(position=robot_pos, velocity=jnp.zeros_like(robot_pos))
+    robot_state = RobotState(
+        position=robot_pos,
+        velocity=jnp.zeros_like(robot_pos),
+        heading=jnp.zeros((map_batch_size, num_robots), dtype=robot_pos.dtype),
+    )
     people_state = PeopleState(position=people_pos, velocity=jnp.zeros_like(people_pos))
     return SimulationState(robots=robot_state, people=people_state), maps
 
@@ -141,7 +150,16 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--num-robots", type=int, default=1, help="Robots per environment.")
     parser.add_argument("--num-angles", type=int, default=360, help="LiDAR rays (uniform in [-pi, pi)).")
     parser.add_argument("--lidar-max-range", type=float, default=10.0, help="LiDAR max range.")
+    parser.add_argument(
+        "--sim-speed",
+        type=float,
+        default=1.0,
+        help="Simulation speed multiplier. 1.0 is real-time, larger values run faster.",
+    )
     args = parser.parse_args(argv)
+
+    if args.sim_speed <= 0.0:
+        parser.error("--sim-speed must be positive.")
 
     # Configs
     sim_config = SimulationConfig()
@@ -199,6 +217,7 @@ def main(argv: list[str] | None = None):
                 axis=2,
             ).squeeze(2)
             robot_positions = np.asarray(state.robots.position)
+            robot_headings = np.asarray(state.robots.heading)
             deltas = current_targets - robot_positions
             distances = np.linalg.norm(deltas, axis=-1)
             reached = distances <= 0.3
@@ -214,6 +233,19 @@ def main(argv: list[str] | None = None):
 
             norms = np.clip(distances[..., None], a_min=1e-6, a_max=None)
             directions = deltas / norms
+            desired_heading = np.arctan2(directions[..., 1], directions[..., 0])
+            heading_error = np.arctan2(
+                np.sin(desired_heading - robot_headings), np.cos(desired_heading - robot_headings)
+            )
+            angular_speed = np.clip(
+                heading_error / 0.5,
+                -sim_config.max_robot_angular_speed,
+                sim_config.max_robot_angular_speed,
+            )
+            robot_speed = 0.9 * sim_config.max_robot_speed
+            linear_speed = robot_speed * np.clip(np.cos(heading_error), 0.0, 1.0)
+            linear_speed = np.where(distances <= 0.1, 0.0, linear_speed)
+            actions_np = np.stack([linear_speed, angular_speed], axis=-1).astype(np.float32)
             robot_speed = 0.9 * sim_config.max_robot_speed
             actions_np = (directions * robot_speed).astype(np.float32)
             actions = jnp.asarray(actions_np)
@@ -272,6 +304,7 @@ def main(argv: list[str] | None = None):
 
         # Optional render
         if args.render:
+            frame_delay = sim_config.dt / max(args.sim_speed, 1e-6)
             render_state = _maybe_render(
                 state,
                 maps,
@@ -280,6 +313,8 @@ def main(argv: list[str] | None = None):
                 current_targets,
                 env_index=env_to_render,
                 render_state=render_state,
+                sim_config=sim_config,
+                frame_delay=frame_delay,
             )
 
     # keep window open briefly if rendering

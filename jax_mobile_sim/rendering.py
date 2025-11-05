@@ -20,11 +20,14 @@ class RenderConfig:
 
     robot_radius: float = 0.2
     person_radius: float = 0.2
-    lidar_color: str = "tab:orange"
+    lidar_far_color: tuple[float, float, float] = (0.83, 0.83, 0.83)
+    lidar_near_color: tuple[float, float, float] = (1.0, 0.0, 0.0)
     wall_color: str = "black"
     robot_color: str = "tab:blue"
     person_color: str = "tab:green"
     lidar_alpha: float = 0.4
+    waypoint_marker_color: str = "red"
+    waypoint_marker_size: float = 120.0
 
 
 def _to_numpy(array) -> np.ndarray:
@@ -41,6 +44,7 @@ def render_environment(
     *,
     env_index: int = 0,
     robot_index: int = 0,
+    robot_waypoints=None,
     config: Optional[RenderConfig] = None,
     ax: Optional[plt.Axes] = None,
 ) -> plt.Axes:
@@ -80,13 +84,35 @@ def render_environment(
     distances = _to_numpy(lidar_distances[env_index, robot_index])
     endpoints = robot_pos + distances[:, None] * directions
     lidar_segments = np.stack([np.broadcast_to(robot_pos, endpoints.shape), endpoints], axis=1)
+    if len(distances) > 0:
+        max_distance = np.max(distances)
+        if max_distance <= 1e-6:
+            mix = np.zeros_like(distances)
+        else:
+            mix = 1.0 - np.clip(distances / max_distance, 0.0, 1.0)
+        near_color = np.asarray((*config.lidar_near_color, config.lidar_alpha))
+        far_color = np.asarray((*config.lidar_far_color, config.lidar_alpha))
+        colors = far_color + mix[:, None] * (near_color - far_color)
+    else:
+        colors = np.zeros((0, 4))
     lidar_collection = LineCollection(
         lidar_segments,
-        colors=config.lidar_color,
+        colors=colors,
         linewidths=1.0,
-        alpha=config.lidar_alpha,
     )
     ax.add_collection(lidar_collection)
+
+    if robot_waypoints is not None:
+        waypoint = _to_numpy(robot_waypoints[env_index, robot_index])
+        if np.all(np.isfinite(waypoint)):
+            ax.scatter(
+                waypoint[0],
+                waypoint[1],
+                marker="*",
+                s=config.waypoint_marker_size,
+                c=config.waypoint_marker_color,
+                edgecolors="none",
+            )
 
     ax.set_xlim(0.0, world_size[0])
     ax.set_ylim(0.0, world_size[1])

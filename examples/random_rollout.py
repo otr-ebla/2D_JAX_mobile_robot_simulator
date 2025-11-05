@@ -7,6 +7,7 @@ import sys
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 # Make repo importable when running from examples/
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -29,6 +30,7 @@ def _maybe_render(
     maps: IndoorMapBatch,
     angles: jax.Array,
     lidar_distances: jax.Array,
+    current_robot_waypoints,
     *,
     env_index: int,
     render_state: dict,
@@ -48,6 +50,9 @@ def _maybe_render(
         render_state["renderer"] = renderer = render_environment
         render_state["plt"] = plt_module = plt
 
+    if state.robots.position.shape[1] == 0:
+        return render_state
+
     render_ax = renderer(
         state,
         maps,
@@ -55,6 +60,7 @@ def _maybe_render(
         lidar_distances,
         env_index=env_index,
         robot_index=0,
+        robot_waypoints=current_robot_waypoints,
         config=render_config,
         ax=render_ax,
     )
@@ -97,6 +103,34 @@ def initialize_state(
     return SimulationState(robots=robot_state, people=people_state), maps
 
 
+def generate_waypoints(
+    key: jax.Array,
+    map_batch_size: int,
+    num_agents: int,
+    num_waypoints: int,
+    map_config: MapGenerationConfig,
+    margin: float,
+) -> np.ndarray:
+    if num_agents == 0:
+        return np.zeros((map_batch_size, num_agents, num_waypoints, 2), dtype=np.float32)
+
+    waypoint_key_x, waypoint_key_y = jax.random.split(key)
+    xs = jax.random.uniform(
+        waypoint_key_x,
+        (map_batch_size, num_agents, num_waypoints, 1),
+        minval=margin,
+        maxval=map_config.world_size[0] - margin,
+    )
+    ys = jax.random.uniform(
+        waypoint_key_y,
+        (map_batch_size, num_agents, num_waypoints, 1),
+        minval=margin,
+        maxval=map_config.world_size[1] - margin,
+    )
+    waypoints = jnp.concatenate([xs, ys], axis=-1)
+    return np.asarray(waypoints)
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Run a random rollout in the 2D simulator.")
     parser.add_argument("--render", action="store_true", help="Enable matplotlib rendering for one environment.")
@@ -124,6 +158,29 @@ def main(argv: list[str] | None = None):
         map_config,
     )
 
+    margin = 2.0 * max(sim_config.robot_radius, sim_config.person_radius)
+    waypoint_key_robot, waypoint_key_people = jax.random.split(jax.random.PRNGKey(123))
+    num_robot_waypoints = 5
+    num_people_waypoints = 4
+    robot_waypoints = generate_waypoints(
+        waypoint_key_robot,
+        args.batch_size,
+        args.num_robots,
+        num_robot_waypoints,
+        map_config,
+        margin,
+    )
+    people_waypoints = generate_waypoints(
+        waypoint_key_people,
+        args.batch_size,
+        args.num_people,
+        num_people_waypoints,
+        map_config,
+        margin,
+    )
+    robot_waypoint_indices = np.zeros((args.batch_size, args.num_robots), dtype=np.int32)
+    people_waypoint_indices = np.zeros((args.batch_size, args.num_people), dtype=np.int32)
+
     # Controls + sensors
     actions_key = jax.random.PRNGKey(42)
     angles = jnp.linspace(-jnp.pi, jnp.pi, args.num_angles, endpoint=False)
@@ -133,13 +190,68 @@ def main(argv: list[str] | None = None):
     env_to_render = int(jnp.clip(args.env_index, 0, args.batch_size - 1))
 
     for step in range(args.steps):
-        # Random actions in [-1, 1]
         actions_key, sub = jax.random.split(actions_key)
-        actions = jax.random.uniform(
-            sub,
-            (args.batch_size, args.num_robots, 2),
-            minval=-1.0, maxval=1.0,
-        )
+
+        if args.num_robots > 0:
+            current_targets = np.take_along_axis(
+                robot_waypoints,
+                robot_waypoint_indices[..., None, None],
+                axis=2,
+            ).squeeze(2)
+            robot_positions = np.asarray(state.robots.position)
+            deltas = current_targets - robot_positions
+            distances = np.linalg.norm(deltas, axis=-1)
+            reached = distances <= 0.3
+            if np.any(reached):
+                robot_waypoint_indices = (robot_waypoint_indices + reached.astype(np.int32)) % num_robot_waypoints
+                current_targets = np.take_along_axis(
+                    robot_waypoints,
+                    robot_waypoint_indices[..., None, None],
+                    axis=2,
+                ).squeeze(2)
+                deltas = current_targets - robot_positions
+                distances = np.linalg.norm(deltas, axis=-1)
+
+            norms = np.clip(distances[..., None], a_min=1e-6, a_max=None)
+            directions = deltas / norms
+            robot_speed = 0.9 * sim_config.max_robot_speed
+            actions_np = (directions * robot_speed).astype(np.float32)
+            actions = jnp.asarray(actions_np)
+        else:
+            current_targets = np.zeros((args.batch_size, args.num_robots, 2), dtype=np.float32)
+            actions = jnp.zeros((args.batch_size, args.num_robots, 2), dtype=jnp.float32)
+
+        if args.num_people > 0:
+            people_targets = np.take_along_axis(
+                people_waypoints,
+                people_waypoint_indices[..., None, None],
+                axis=2,
+            ).squeeze(2)
+            people_positions = np.asarray(state.people.position)
+            people_deltas = people_targets - people_positions
+            people_distances = np.linalg.norm(people_deltas, axis=-1)
+            people_reached = people_distances <= 0.4
+            if np.any(people_reached):
+                people_waypoint_indices = (people_waypoint_indices + people_reached.astype(np.int32)) % num_people_waypoints
+                people_targets = np.take_along_axis(
+                    people_waypoints,
+                    people_waypoint_indices[..., None, None],
+                    axis=2,
+                ).squeeze(2)
+                people_deltas = people_targets - people_positions
+                people_distances = np.linalg.norm(people_deltas, axis=-1)
+
+            people_norms = np.clip(people_distances[..., None], a_min=1e-6, a_max=None)
+            people_directions = people_deltas / people_norms
+            desired_people_velocity = jnp.asarray(
+                (people_directions * (0.8 * sim_config.max_person_speed)).astype(np.float32)
+            )
+            state = SimulationState(
+                robots=state.robots,
+                people=PeopleState(position=state.people.position, velocity=desired_people_velocity),
+            )
+        else:
+            people_targets = np.zeros((args.batch_size, args.num_people, 2), dtype=np.float32)
 
         # LiDAR (before stepping, for visualization of current state)
         lidar_distances = lidar_scan(state.robots.position, angles, args.lidar_max_range, maps)
@@ -158,6 +270,7 @@ def main(argv: list[str] | None = None):
                 maps,
                 angles,
                 lidar_distances,
+                current_targets,
                 env_index=env_to_render,
                 render_state=render_state,
             )

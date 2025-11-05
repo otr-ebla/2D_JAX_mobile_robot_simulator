@@ -295,20 +295,24 @@ def main(argv: list[str] | None = None):
         else:
             people_targets = np.zeros((args.batch_size, args.num_people, 2), dtype=np.float32)
 
-        # LiDAR (before stepping, for visualization of current state)
-        # LiDAR (before stepping, for visualization of current state)
-        # LiDAR (before stepping, for visualization of current state)
-        lidar_distances = lidar_scan(
+        # Step simulation with higher-frequency dynamics
+        step_key = jax.random.fold_in(sub, step)
+        state = step_simulation(state, actions, maps, sim_config, step_key)
+
+        # High-frequency LiDAR after the dynamics step
+        lidar_distances, _ = lidar_scan(
             state.robots.position,
             angles,
-            lidar_max_range,  # This is the max_range parameter
-            maps,              # This is the map_batch parameter
+            lidar_max_range,
+            maps,
             people_positions=state.people.position,
             person_radius=sim_config.person_radius,
+            num_subsamples=sim_config.lidar_updates_per_step,
+            origin_velocities=state.robots.velocity,
+            people_velocities=state.people.velocity,
+            dt=sim_config.dt,
+            return_history=True,
         )
-
-        # Step simulation
-        state = step_simulation(state, actions, maps, sim_config, jax.random.fold_in(sub, step))
 
         # Minimal log
         if step % 10 == 0 or step == args.steps - 1:
@@ -317,7 +321,7 @@ def main(argv: list[str] | None = None):
         # Optional render
         if args.render:
             frame_delay = real_time_dt / max(args.sim_speed, 1e-6)
-            frame_delay = sim_config.dt / max(args.sim_speed, 1e-6)
+            frame_delay = sim_config.dt / max(args.sim_speed * sim_config.dynamics_substeps, 1e-6)
             render_state = _maybe_render(
                 state,
                 maps,

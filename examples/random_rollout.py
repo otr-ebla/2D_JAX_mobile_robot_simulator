@@ -300,6 +300,19 @@ def main(argv: list[str] | None = None):
         state = step_simulation(state, actions, maps, sim_config, step_key)
 
         # High-frequency LiDAR after the dynamics step
+        # lidar_distances, _ = lidar_scan(
+        #     state.robots.position,
+        #     angles,
+        #     lidar_max_range,
+        #     maps,
+        #     people_positions=state.people.position,
+        #     person_radius=sim_config.person_radius,
+        #     num_subsamples=sim_config.lidar_updates_per_step,
+        #     origin_velocities=state.robots.velocity,
+        #     people_velocities=state.people.velocity,
+        #     dt=sim_config.dt,
+        #     return_history=True,
+        # )
         lidar_distances, _ = lidar_scan(
             state.robots.position,
             angles,

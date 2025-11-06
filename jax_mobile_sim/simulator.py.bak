@@ -275,7 +275,7 @@ def lidar_scan(
                 # Vectorized circle-ray intersections
                 rel_pos = origin_robot - people_env  # (P, 2)
                 a = ray_norm_sq  # (A,)
-                b = 2.0 * jnp.einsum('ad,pd->ap', directions, rel_pos)  # (A, P)
+                b = 2.0 * jnp.einsum('a,pa->ap', directions, rel_pos)  # (A, P)
                 c = jnp.sum(rel_pos * rel_pos, axis=-1) - person_radius**2  # (P,)
                 
                 # Solve quadratic equation

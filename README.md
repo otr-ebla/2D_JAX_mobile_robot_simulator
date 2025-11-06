@@ -105,6 +105,7 @@ scan, _ = lidar_scan(
     origin_velocities=next_state.robots.velocity,
     people_velocities=next_state.people.velocity,
     dt=sim_config.dt,
+    robot_headings=next_state.robots.heading,
     return_history=True,
 )
 ```

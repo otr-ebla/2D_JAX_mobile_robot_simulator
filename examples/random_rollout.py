@@ -209,7 +209,8 @@ def main(argv: list[str] | None = None):
 
     # Controls + sensors
     actions_key = jax.random.PRNGKey(42)
-    angles = jnp.linspace(-jnp.pi, jnp.pi, args.num_angles, endpoint=False)
+    # LiDAR rays originate at the robot heading and progress clockwise
+    angles = jnp.linspace(0.0, 2 * jnp.pi, args.num_angles, endpoint=False)
 
     # Rendering cache
     render_state = {"ax": None, "config": None, "renderer": None, "plt": None}

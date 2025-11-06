@@ -202,9 +202,15 @@ def lidar_scan(
     dt: float | None = None,
     return_history: bool = False,
 ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
-    """Optimized batched lidar ray casting with better performance."""
+    """Optimized batched lidar ray casting with better performance.
+
+    The ``angles`` input is interpreted as clockwise offsets from each robot's
+    forward heading. As a result, ``angles[0]`` points along the heading
+    direction and subsequent angles sweep clockwise to span the full field of
+    view.
+    """
     
-    # Precompute base ray directions (body-frame)
+    # Precompute base ray directions (body-frame, clockwise from heading)
     base_cos = jnp.cos(angles)
     base_sin = jnp.sin(angles)
     max_range_val = jnp.minimum(jnp.asarray(max_range, dtype=origin.dtype), 30.0)
@@ -245,8 +251,9 @@ def lidar_scan(
 
             cos_h = jnp.cos(heading_robot)
             sin_h = jnp.sin(heading_robot)
-            ray_dx = base_cos * cos_h - base_sin * sin_h  # (A,)
-            ray_dy = base_cos * sin_h + base_sin * cos_h  # (A,)
+            # Interpret `angles` as clockwise offsets from the robot heading
+            ray_dx = base_cos * cos_h + base_sin * sin_h  # (A,)
+            ray_dy = base_cos * sin_h - base_sin * cos_h  # (A,)
             ray_norm_sq = ray_dx * ray_dx + ray_dy * ray_dy
             safe_inv_dx = jnp.where(jnp.abs(ray_dx) > 1e-8, 1.0 / ray_dx, jnp.inf)
             safe_inv_dy = jnp.where(jnp.abs(ray_dy) > 1e-8, 1.0 / ray_dy, jnp.inf)
@@ -407,15 +414,22 @@ def render_lidar_scan_with_borders(
         zorder=3
     )
     ax.add_patch(robot_circle)
-    
+
     # Plot rays and hit points
     env_distances = distances[env_index, robot_index] if distances.ndim > 2 else distances[env_index]
-    
+    robot_heading = float(state.robots.heading[env_index, robot_index])
+    cos_h = jnp.cos(robot_heading)
+    sin_h = jnp.sin(robot_heading)
+
     for ray_idx, angle in enumerate(angles):
         dist = env_distances[ray_idx]
-        
+
         if jnp.isfinite(dist) and dist < 30.0:  # Valid hit
-            end_point = robot_pos + dist * jnp.array([jnp.cos(angle), jnp.sin(angle)])
+            base_cos = jnp.cos(angle)
+            base_sin = jnp.sin(angle)
+            dir_x = base_cos * cos_h + base_sin * sin_h
+            dir_y = base_cos * sin_h - base_sin * cos_h
+            end_point = robot_pos + dist * jnp.array([dir_x, dir_y])
             
             # Draw ray
             ax.plot(

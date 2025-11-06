@@ -324,6 +324,7 @@ def main(argv: list[str] | None = None):
             origin_velocities=state.robots.velocity,
             people_velocities=state.people.velocity,
             dt=sim_config.dt,
+            robot_headings=state.robots.heading,
             return_history=True,
         )
 

@@ -198,13 +198,15 @@ def lidar_scan(
     num_subsamples: int = 1,
     origin_velocities: jnp.ndarray | None = None,
     people_velocities: jnp.ndarray | None = None,
+    robot_headings: jnp.ndarray | None = None,
     dt: float | None = None,
     return_history: bool = False,
 ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     """Optimized batched lidar ray casting with better performance."""
     
-    # Precompute ray directions and properties
-    directions = jnp.stack([jnp.cos(angles), jnp.sin(angles)], axis=-1)  # (A, 2)
+    # Precompute base ray directions (body-frame)
+    base_cos = jnp.cos(angles)
+    base_sin = jnp.sin(angles)
     max_range_val = jnp.minimum(jnp.asarray(max_range, dtype=origin.dtype), 30.0)
     
     # Handle optional inputs
@@ -214,21 +216,16 @@ def lidar_scan(
         origin_velocities = jnp.zeros_like(origin)
     if people_velocities is None:
         people_velocities = jnp.zeros_like(people_positions)
+    if robot_headings is None:
+        robot_headings = jnp.zeros(origin.shape[:-1], dtype=origin.dtype)
 
     # Precompute segment properties
     segments = map_batch.segments  # (B, S, 4)
     segment_mask = map_batch.segment_mask  # (B, S)
     
-    # Precompute ray properties
-    ray_dx = directions[:, 0]  # (A,)
-    ray_dy = directions[:, 1]  # (A,)
-    ray_norm_sq = jnp.sum(directions * directions, axis=-1)  # (A,)
-    
-    # Safe inverses for ray directions to avoid division by zero
-    safe_inv_dx = jnp.where(jnp.abs(ray_dx) > 1e-8, 1.0 / ray_dx, jnp.inf)
-    safe_inv_dy = jnp.where(jnp.abs(ray_dy) > 1e-8, 1.0 / ray_dy, jnp.inf)
-
-    def cast_single_environment(origin_env, segments_env, seg_mask_env, people_env):
+    def cast_single_environment(
+        origin_env, segments_env, seg_mask_env, people_env, headings_env
+    ):
         """Cast rays for a single environment."""
         
         # Extract segment properties for this environment
@@ -242,10 +239,18 @@ def lidar_scan(
         y_min = jnp.minimum(y0, y1)
         y_max = jnp.maximum(y0, y1)
         
-        def cast_single_robot(origin_robot):
+        def cast_single_robot(origin_robot, heading_robot):
             """Cast all rays for a single robot position."""
             ox, oy = origin_robot
-            
+
+            cos_h = jnp.cos(heading_robot)
+            sin_h = jnp.sin(heading_robot)
+            ray_dx = base_cos * cos_h - base_sin * sin_h  # (A,)
+            ray_dy = base_cos * sin_h + base_sin * cos_h  # (A,)
+            ray_norm_sq = ray_dx * ray_dx + ray_dy * ray_dy
+            safe_inv_dx = jnp.where(jnp.abs(ray_dx) > 1e-8, 1.0 / ray_dx, jnp.inf)
+            safe_inv_dy = jnp.where(jnp.abs(ray_dy) > 1e-8, 1.0 / ray_dy, jnp.inf)
+
             # Vectorized wall intersections - Vertical segments
             t_vertical = (x0[None, :] - ox) * safe_inv_dx[:, None]  # (A, S)
             y_hit = oy + t_vertical * ray_dy[:, None]
@@ -275,7 +280,9 @@ def lidar_scan(
                 # Vectorized circle-ray intersections
                 rel_pos = origin_robot - people_env  # (P, 2)
                 a = ray_norm_sq  # (A,)
-                b = 2.0 * jnp.einsum('ad,pd->ap', directions, rel_pos)  # (A, P)
+                rel_x = rel_pos[:, 0]
+                rel_y = rel_pos[:, 1]
+                b = 2.0 * (ray_dx[:, None] * rel_x[None, :] + ray_dy[:, None] * rel_y[None, :])
                 c = jnp.sum(rel_pos * rel_pos, axis=-1) - person_radius**2  # (P,)
                 
                 # Solve quadratic equation
@@ -301,14 +308,14 @@ def lidar_scan(
             # Combine all distances
             final_dist = jnp.minimum(min_wall_dist, min_people_dist)
             return jnp.minimum(final_dist, max_range_val)
-        
-        return jax.vmap(cast_single_robot)(origin_env)
+
+        return jax.vmap(cast_single_robot)(origin_env, headings_env)
     
     # Main scanning logic
     samples = max(int(num_subsamples), 1)
     if samples == 1:
         distances = jax.vmap(cast_single_environment)(
-            origin, segments, segment_mask, people_positions
+            origin, segments, segment_mask, people_positions, robot_headings
         )
         if return_history:
             return distances, distances[jnp.newaxis, ...]
@@ -322,7 +329,9 @@ def lidar_scan(
 
     def scan_step(carry, _):
         origin_pos, people_pos = carry
-        d = jax.vmap(cast_single_environment)(origin_pos, segments, segment_mask, people_pos)
+        d = jax.vmap(cast_single_environment)(
+            origin_pos, segments, segment_mask, people_pos, robot_headings
+        )
         return (origin_pos + origin_delta, people_pos + people_delta), d
 
     (_, _), history = jax.lax.scan(

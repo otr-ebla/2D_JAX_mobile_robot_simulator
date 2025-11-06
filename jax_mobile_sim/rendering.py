@@ -116,7 +116,15 @@ def render_environment(
     )
     ax.add_line(robot_line)
 
-    directions = np.stack([np.cos(_to_numpy(lidar_angles)), np.sin(_to_numpy(lidar_angles))], axis=-1)
+    lidar_angles_np = _to_numpy(lidar_angles)
+    base_cos = np.cos(lidar_angles_np)
+    base_sin = np.sin(lidar_angles_np)
+    cos_h = np.cos(robot_heading)
+    sin_h = np.sin(robot_heading)
+    # LiDAR rays follow clockwise ordering relative to the robot heading
+    dir_x = base_cos * cos_h + base_sin * sin_h
+    dir_y = base_cos * sin_h - base_sin * cos_h
+    directions = np.stack([dir_x, dir_y], axis=-1)
     distances = _to_numpy(lidar_distances[env_index, robot_index])
     start_offsets = config.robot_radius * directions
     start_points = robot_pos + start_offsets

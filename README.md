@@ -93,7 +93,8 @@ state = SimulationState(
 actions = jnp.zeros((1024, 1, 2))  # linear and angular commands
 key, step_key = jax.random.split(key)
 next_state = step_simulation(state, actions, maps, sim_config, step_key)
-angles = jnp.linspace(-jnp.pi, jnp.pi, 180)
+# Angles start at the robot heading and sweep clockwise over 360°
+angles = jnp.linspace(0.0, 2 * jnp.pi, 180, endpoint=False)
 scan, _ = lidar_scan(
     next_state.robots.position,
     angles,
@@ -105,6 +106,7 @@ scan, _ = lidar_scan(
     origin_velocities=next_state.robots.velocity,
     people_velocities=next_state.people.velocity,
     dt=sim_config.dt,
+    robot_headings=next_state.robots.heading,
     return_history=True,
 )
 ```

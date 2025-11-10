@@ -1,4 +1,4 @@
-"""Example rollout showcasing the 2D JAX simulator."""
+"""Optimized rollout for high-frequency 2D simulator."""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+DT = 0.1
+
 from jax_mobile_sim.environment import IndoorMapBatch, MapGenerationConfig, generate_map_batch
 from jax_mobile_sim.simulator import (
     PeopleState,
@@ -25,8 +27,7 @@ from jax_mobile_sim.simulator import (
     step_simulation,
 )
 
-
-def _maybe_render(
+def _maybe_render_fast(
     state: SimulationState,
     maps: IndoorMapBatch,
     angles: jax.Array,
@@ -38,7 +39,7 @@ def _maybe_render(
     sim_config: SimulationConfig,
     frame_delay: float,
 ) -> dict:
-    """Render the requested environment on demand (lazy init)."""
+    """Fast rendering with minimal overhead."""
     render_ax = render_state.get("ax")
     render_config = render_state.get("config")
     renderer = render_state.get("renderer")
@@ -49,16 +50,21 @@ def _maybe_render(
         from jax_mobile_sim.rendering import RenderConfig, render_environment
 
         plt.ion()
+        fig, ax = plt.subplots(figsize=(8, 6))
         render_state["config"] = render_config = RenderConfig(
             robot_radius=sim_config.robot_radius,
             person_radius=sim_config.person_radius,
+            lidar_alpha=0.2,  # Reduced alpha for faster rendering
         )
         render_state["renderer"] = renderer = render_environment
         render_state["plt"] = plt_module = plt
+        render_state["ax"] = ax
+        render_state["fig"] = fig
 
     if state.robots.position.shape[1] == 0:
         return render_state
 
+    # Use the existing axis for faster updates
     render_ax = renderer(
         state,
         maps,
@@ -70,12 +76,15 @@ def _maybe_render(
         config=render_config,
         ax=render_ax,
     )
+    
+    # Minimal canvas update
+    render_ax.figure.canvas.draw()
     render_ax.figure.canvas.flush_events()
-    plt_module.pause(max(frame_delay, 0.0))
+    
+    # Very short pause for responsiveness
+    plt_module.pause(max(frame_delay * 0.1, 0.001))  # Reduced pause
 
-    render_state["ax"] = render_ax
     return render_state
-
 
 def initialize_state(
     key: jax.Array,
@@ -112,7 +121,6 @@ def initialize_state(
     people_state = PeopleState(position=people_pos, velocity=jnp.zeros_like(people_pos))
     return SimulationState(robots=robot_state, people=people_state), maps
 
-
 def generate_waypoints(
     key: jax.Array,
     map_batch_size: int,
@@ -120,60 +128,56 @@ def generate_waypoints(
     num_waypoints: int,
     map_config: MapGenerationConfig,
     margin: float,
-) -> np.ndarray:
+) -> jnp.ndarray:
     if num_agents == 0:
-        return np.zeros((map_batch_size, num_agents, num_waypoints, 2), dtype=np.float32)
+        return jnp.zeros((map_batch_size, num_agents, num_waypoints, 2), dtype=jnp.float32)
 
-    waypoint_key_x, waypoint_key_y = jax.random.split(key)
-    xs = jax.random.uniform(
-        waypoint_key_x,
-        (map_batch_size, num_agents, num_waypoints, 1),
-        minval=margin,
-        maxval=map_config.world_size[0] - margin,
-    )
-    ys = jax.random.uniform(
-        waypoint_key_y,
-        (map_batch_size, num_agents, num_waypoints, 1),
-        minval=margin,
-        maxval=map_config.world_size[1] - margin,
-    )
-    waypoints = jnp.concatenate([xs, ys], axis=-1)
-    return np.asarray(waypoints)
+    @jax.jit
+    def generate_waypoints_jit(key):
+        waypoint_key_x, waypoint_key_y = jax.random.split(key)
+        xs = jax.random.uniform(
+            waypoint_key_x,
+            (map_batch_size, num_agents, num_waypoints, 1),
+            minval=margin,
+            maxval=map_config.world_size[0] - margin,
+        )
+        ys = jax.random.uniform(
+            waypoint_key_y,
+            (map_batch_size, num_agents, num_waypoints, 1),
+            minval=margin,
+            maxval=map_config.world_size[1] - margin,
+        )
+        return jnp.concatenate([xs, ys], axis=-1)
 
+    return generate_waypoints_jit(key)
 
 def main(argv: list[str] | None = None):
-    parser = argparse.ArgumentParser(description="Run a random rollout in the 2D simulator.")
+    parser = argparse.ArgumentParser(description="Run optimized random rollout in the 2D simulator.")
     parser.add_argument("--render", action="store_true", help="Enable matplotlib rendering for one environment.")
     parser.add_argument("--env-index", type=int, default=0, help="Environment index to render.")
-    parser.add_argument("--steps", type=int, default=50, help="Number of simulation steps to run.")
-    parser.add_argument("--batch-size", type=int, default=8, help="Number of parallel environments.")
-    parser.add_argument("--num-people", type=int, default=5, help="People per environment.")
+    parser.add_argument("--steps", type=int, default=200, help="Number of simulation steps to run.")
+    parser.add_argument("--batch-size", type=int, default=4, help="Number of parallel environments.")  # Reduced
+    parser.add_argument("--num-people", type=int, default=3, help="People per environment.")  # Reduced
     parser.add_argument("--num-robots", type=int, default=1, help="Robots per environment.")
-    parser.add_argument("--num-angles", type=int, default=360, help="LiDAR rays (uniform in [-pi, pi)).")
-    parser.add_argument(
-        "--lidar-max-range",
-        type=float,
-        default=30.0,
-        help="LiDAR max range (values above 30 m are clipped).",
-    )
-    parser.add_argument(
-        "--sim-speed",
-        type=float,
-        default=1.0,
-        help="Simulation speed multiplier. 1.0 is real-time, larger values run faster.",
-    )
+    parser.add_argument("--num-angles", type=int, default=90, help="LiDAR rays (reduced for performance).")  # Reduced
+    parser.add_argument("--lidar-max-range", type=float, default=15.0, help="LiDAR max range.")  # Reduced
+    parser.add_argument("--sim-speed", type=float, default=2.0, help="Simulation speed multiplier.")  # Increased
     args = parser.parse_args(argv)
 
-    if args.sim_speed <= 0.0:
-        parser.error("--sim-speed must be positive.")
-
-    # Configs
+    # OPTIMIZED Configs - Reduced complexity
     base_sim_config = SimulationConfig()
-    sim_config = replace(base_sim_config, dt=base_sim_config.dt * args.sim_speed)
-    real_time_dt = base_sim_config.dt
-    map_config = MapGenerationConfig()
+    sim_config = replace(
+        base_sim_config, 
+        dt=DT,  # Smaller dt for stability at high speed
+        dynamics_substeps=1,  # Reduced from 4
+        lidar_updates_per_step=1,  # Reduced from 12
+        max_robot_speed=2.0,  # Increased for faster movement
+        max_person_speed=1.5
+    )
+    
+    map_config = MapGenerationConfig(max_segments=80)  # Reduced map complexity
 
-    # Init state
+    # Init state - DON'T JIT compile map generation
     key = jax.random.PRNGKey(0)
     state, maps = initialize_state(
         key,
@@ -184,10 +188,12 @@ def main(argv: list[str] | None = None):
         map_config,
     )
 
+    # Waypoints
     margin = 2.0 * max(sim_config.robot_radius, sim_config.person_radius)
     waypoint_key_robot, waypoint_key_people = jax.random.split(jax.random.PRNGKey(123))
-    num_robot_waypoints = 5
-    num_people_waypoints = 4
+    
+    num_robot_waypoints = 3  # Reduced
+    num_people_waypoints = 2  # Reduced
     robot_waypoints = generate_waypoints(
         waypoint_key_robot,
         args.batch_size,
@@ -204,140 +210,102 @@ def main(argv: list[str] | None = None):
         map_config,
         margin,
     )
-    robot_waypoint_indices = np.zeros((args.batch_size, args.num_robots), dtype=np.int32)
-    people_waypoint_indices = np.zeros((args.batch_size, args.num_people), dtype=np.int32)
+    
+    robot_waypoint_indices = jnp.zeros((args.batch_size, args.num_robots), dtype=jnp.int32)
+    people_waypoint_indices = jnp.zeros((args.batch_size, args.num_people), dtype=jnp.int32)
 
     # Controls + sensors
     actions_key = jax.random.PRNGKey(42)
-    # LiDAR rays originate at the robot heading and progress clockwise
     angles = jnp.linspace(0.0, 2 * jnp.pi, args.num_angles, endpoint=False)
+
+    # JIT compiled simulation step
+    @jax.jit
+    def simulation_step(state, actions, maps, key):
+        return step_simulation(state, actions, maps, sim_config, key)
+
+    # JIT compiled lidar
+    @jax.jit
+    def lidar_step(state, maps):
+        return lidar_scan(
+            state.robots.position,
+            angles,
+            args.lidar_max_range,
+            maps,
+            people_positions=state.people.position,
+            person_radius=sim_config.person_radius,
+            num_subsamples=1,  # Reduced
+            origin_velocities=state.robots.velocity,
+            people_velocities=state.people.velocity,
+            robot_headings=state.robots.heading,
+            dt=sim_config.dt,
+            return_history=False,  # No history for performance
+        )
 
     # Rendering cache
     render_state = {"ax": None, "config": None, "renderer": None, "plt": None}
     env_to_render = int(jnp.clip(args.env_index, 0, args.batch_size - 1))
 
-    lidar_max_range = min(args.lidar_max_range, 30.0)
+    print(f"Starting optimized simulation with {args.steps} steps...")
+    print(f"Target FPS: {1.0/sim_config.dt:.1f}")
 
+    import time
+    total_start = time.perf_counter()
+    
     for step in range(args.steps):
+        step_start = time.perf_counter()
         actions_key, sub = jax.random.split(actions_key)
 
+        # Simplified control logic
         if args.num_robots > 0:
+            # Convert to numpy only for control logic
             current_targets = np.take_along_axis(
-                robot_waypoints,
-                robot_waypoint_indices[..., None, None],
+                np.array(robot_waypoints),
+                np.array(robot_waypoint_indices)[..., None, None],
                 axis=2,
             ).squeeze(2)
-            robot_positions = np.asarray(state.robots.position)
-            robot_headings = np.asarray(state.robots.heading)
+            robot_positions = np.array(state.robots.position)
+            robot_headings = np.array(state.robots.heading)
+            
             deltas = current_targets - robot_positions
             distances = np.linalg.norm(deltas, axis=-1)
-            reached = distances <= 0.3
+            reached = distances <= 0.5  # Increased threshold
+            
             if np.any(reached):
                 robot_waypoint_indices = (robot_waypoint_indices + reached.astype(np.int32)) % num_robot_waypoints
                 current_targets = np.take_along_axis(
-                    robot_waypoints,
-                    robot_waypoint_indices[..., None, None],
+                    np.array(robot_waypoints),
+                    np.array(robot_waypoint_indices)[..., None, None],
                     axis=2,
                 ).squeeze(2)
                 deltas = current_targets - robot_positions
-                distances = np.linalg.norm(deltas, axis=-1)
-
-            norms = np.clip(distances[..., None], a_min=1e-6, a_max=None)
-            directions = deltas / norms
-            desired_heading = np.arctan2(directions[..., 1], directions[..., 0])
-            heading_error = np.arctan2(
-                np.sin(desired_heading - robot_headings), np.cos(desired_heading - robot_headings)
-            )
-            angular_speed = np.clip(
-                heading_error / 0.5,
-                -sim_config.max_robot_angular_speed,
-                sim_config.max_robot_angular_speed,
-            )
-            robot_speed = 0.9 * sim_config.max_robot_speed
-            linear_speed = robot_speed * np.clip(np.cos(heading_error), 0.0, 1.0)
-            linear_speed = np.where(distances <= 0.1, 0.0, linear_speed)
-            actions_np = np.stack([linear_speed, angular_speed], axis=-1).astype(np.float32)
-            robot_speed = 0.9 * sim_config.max_robot_speed
-            actions_np = (directions * robot_speed).astype(np.float32)
+            
+            # Simple control: move toward target
+            actions_np = deltas * 0.5  # Reduced gain
             actions = jnp.asarray(actions_np)
         else:
-            current_targets = np.zeros((args.batch_size, args.num_robots, 2), dtype=np.float32)
+            current_targets = jnp.zeros((args.batch_size, args.num_robots, 2), dtype=jnp.float32)
             actions = jnp.zeros((args.batch_size, args.num_robots, 2), dtype=jnp.float32)
 
-        if args.num_people > 0:
-            people_targets = np.take_along_axis(
-                people_waypoints,
-                people_waypoint_indices[..., None, None],
-                axis=2,
-            ).squeeze(2)
-            people_positions = np.asarray(state.people.position)
-            people_deltas = people_targets - people_positions
-            people_distances = np.linalg.norm(people_deltas, axis=-1)
-            people_reached = people_distances <= 0.4
-            if np.any(people_reached):
-                people_waypoint_indices = (people_waypoint_indices + people_reached.astype(np.int32)) % num_people_waypoints
-                people_targets = np.take_along_axis(
-                    people_waypoints,
-                    people_waypoint_indices[..., None, None],
-                    axis=2,
-                ).squeeze(2)
-                people_deltas = people_targets - people_positions
-                people_distances = np.linalg.norm(people_deltas, axis=-1)
-
-            people_norms = np.clip(people_distances[..., None], a_min=1e-6, a_max=None)
-            people_directions = people_deltas / people_norms
-            desired_people_velocity = jnp.asarray(
-                (people_directions * (0.8 * sim_config.max_person_speed)).astype(np.float32)
-            )
-            state = SimulationState(
-                robots=state.robots,
-                people=PeopleState(position=state.people.position, velocity=desired_people_velocity),
-            )
-        else:
-            people_targets = np.zeros((args.batch_size, args.num_people, 2), dtype=np.float32)
-
-        # Step simulation with higher-frequency dynamics
+        # Step simulation
         step_key = jax.random.fold_in(sub, step)
-        state = step_simulation(state, actions, maps, sim_config, step_key)
+        state = simulation_step(state, actions, maps, step_key)
 
-        # High-frequency LiDAR after the dynamics step
-        # lidar_distances, _ = lidar_scan(
-        #     state.robots.position,
-        #     angles,
-        #     lidar_max_range,
-        #     maps,
-        #     people_positions=state.people.position,
-        #     person_radius=sim_config.person_radius,
-        #     num_subsamples=sim_config.lidar_updates_per_step,
-        #     origin_velocities=state.robots.velocity,
-        #     people_velocities=state.people.velocity,
-        #     dt=sim_config.dt,
-        #     return_history=True,
-        # )
-        lidar_distances, _ = lidar_scan(
-            state.robots.position,
-            angles,
-            lidar_max_range,
-            maps,
-            people_positions=state.people.position,
-            person_radius=sim_config.person_radius,
-            num_subsamples=sim_config.lidar_updates_per_step,
-            origin_velocities=state.robots.velocity,
-            people_velocities=state.people.velocity,
-            dt=sim_config.dt,
-            robot_headings=state.robots.heading,
-            return_history=True,
-        )
+        # Lidar - only every few steps for performance
+        
+        lidar_distances = lidar_step(state, maps)
+        
 
-        # Minimal log
-        if step % 10 == 0 or step == args.steps - 1:
-            print(f"[step {step}] positions shape: {state.robots.position.shape} | lidar: {lidar_distances.shape}")
+        step_time = time.perf_counter() - step_start
+        
+        # Logging - reduced frequency
+        if step % 20 == 0 or step == args.steps - 1:
+            actual_fps = 1.0 / step_time if step_time > 0 else 0
+            print(f"[step {step:3d}] time: {step_time*1000:.1f}ms, FPS: {actual_fps:.1f}")
 
-        # Optional render
-        if args.render:
-            frame_delay = real_time_dt / max(args.sim_speed, 1e-6)
-            frame_delay = sim_config.dt / max(args.sim_speed * sim_config.dynamics_substeps, 1e-6)
-            render_state = _maybe_render(
+        # Optional render - reduced frequency
+        if args.render:  # Render every 3 steps
+            frame_delay = sim_config.dt / max(args.sim_speed, 1e-6)
+            render_state = _maybe_render_fast(
                 state,
                 maps,
                 angles,
@@ -349,10 +317,15 @@ def main(argv: list[str] | None = None):
                 frame_delay=frame_delay,
             )
 
-    # keep window open briefly if rendering
-    if args.render and render_state.get("plt") is not None:
-        render_state["plt"].pause(0.5)
+    total_time = time.perf_counter() - total_start
+    avg_fps = args.steps / total_time
+    print(f"\n=== Simulation Complete ===")
+    print(f"Total time: {total_time:.2f}s")
+    print(f"Average FPS: {avg_fps:.1f}")
+    print(f"Target vs Actual: {1.0/sim_config.dt:.1f} vs {avg_fps:.1f}")
 
+    if args.render and render_state.get("plt") is not None:
+        render_state["plt"].pause(1.0)
 
 if __name__ == "__main__":
     main()

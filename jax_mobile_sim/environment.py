@@ -235,3 +235,25 @@ def generate_map_batch(key: jax.Array, batch_size: int, config: MapGenerationCon
     sizes = jnp.stack([m.world_size for m in maps], axis=0)
     return IndoorMapBatch(segments=segments, segment_mask=mask, world_size=sizes)
 
+
+# --- Register dataclass as a JAX PyTree ---
+try:
+    from jax import tree_util as _tu
+    _tu.register_pytree_node_dataclass(IndoorMapBatch)
+except Exception:
+    pass
+
+# --- Register IndoorMapBatch as a JAX PyTree ---
+try:
+    from dataclasses import fields as _dc_fields, is_dataclass as _is_dc
+    from jax import tree_util as _tu
+    if _is_dc(IndoorMapBatch):
+        _names = [f.name for f in _dc_fields(IndoorMapBatch)]
+        def _flatten_map(m):
+            kids = tuple(getattr(m, n) for n in _names)
+            return kids, None
+        def _unflatten_map(aux, kids):
+            return IndoorMapBatch(**{n: v for n, v in zip(_names, kids)})
+        _tu.register_pytree_node(IndoorMapBatch, _flatten_map, _unflatten_map)
+except Exception:
+    pass

@@ -71,8 +71,8 @@ def _resolve_axis_aligned_collisions(
 
         def collide_with_segment(pos, segment, is_valid):
             x0, y0, x1, y1 = segment
-            is_vertical = jnp.isclose(x0, x1)
-            is_horizontal = jnp.isclose(y0, y1)
+            is_vertical = (jnp.abs(x0-x1) < 1e-8)
+            is_horizontal = (jnp.abs(y0-y1) < 1e-8)
 
             def vertical_case():
                 xw = x0
@@ -236,8 +236,8 @@ def lidar_scan(
         
         # Extract segment properties for this environment
         x0, y0, x1, y1 = jnp.moveaxis(segments_env, -1, 0)  # (S,) each
-        vertical = jnp.isclose(x0, x1)
-        horizontal = jnp.isclose(y0, y1)
+        vertical = (jnp.abs(x0-x1) < 1e-8)
+        horizontal = (jnp.abs(y0-y1) < 1e-8)
         
         # Precompute segment bounds
         x_min = jnp.minimum(x0, x1)
@@ -464,3 +464,21 @@ def render_lidar_scan_with_borders(
     ax.set_ylim(0, 20)
     
     return ax
+
+# --- Register dataclasses as JAX PyTrees (portable across JAX versions) ---
+from dataclasses import fields as _dc_fields, is_dataclass as _is_dc
+from jax import tree_util as _tu
+
+def _register_dc_as_pytree(cls):
+    if not _is_dc(cls):
+        raise TypeError(f"{cls} is not a dataclass")
+    _names = [f.name for f in _dc_fields(cls)]
+    def _flatten(obj):
+        children = tuple(getattr(obj, n) for n in _names)
+        return children, None
+    def _unflatten(aux, children):
+        return cls(**{n: v for n, v in zip(_names, children)})
+    _tu.register_pytree_node(cls, _flatten, _unflatten)
+
+for _cls in (RobotState, PeopleState, SimulationState, SimulationConfig):
+    _register_dc_as_pytree(_cls)
